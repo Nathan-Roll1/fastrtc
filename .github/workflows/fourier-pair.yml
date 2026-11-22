@@ -1,0 +1,43 @@
+name: Two independent FastRTC browsers, partner captions and received audio
+on:
+  push:
+    branches: [qa/fourier-paired-conversation]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    defaults:
+      run:
+        working-directory: .github/fourier-pair
+    env:
+      GRADIO_ANALYTICS_ENABLED: 'False'
+      OMP_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '1'
+      HF_HUB_DISABLE_XET: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install released CPU packages and fetch licensed recordings
+        run: |
+          python -m pip install -q uv
+          uv pip install --system -q -r two-person/requirements.txt 'playwright==1.55.0' 'pyarrow==21.0.0'
+          python fixtures.py
+      - name: Exercise paired WebRTC audio and captions in independent Chromium processes
+        run: |
+          python two-person/conversation.py >server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; tail -80 server.log' EXIT
+          python verify.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: two-person-browser-proof
+          path: .github/fourier-pair/verification.json
+          retention-days: 14

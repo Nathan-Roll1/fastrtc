@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Two-person captions</title>
+<style>
+body{font:18px/1.5 system-ui,sans-serif;max-width:38rem;margin:8vh auto;padding:0 1.3rem;color:#191d22}h1{line-height:1.12}button,input{font:inherit;padding:.4rem .75rem;margin:.2rem .2rem .2rem 0}input{max-width:90%}output{display:block;margin:1.25rem 0}audio{max-width:100%}#code{font-size:.9rem}li{margin:.5rem 0}
+</style>
+<main><h1>Two-person captions</h1>
+<p>Open this page in two browser profiles. Create a room in one and enter its single-use invite in the other. Wear headphones.</p>
+<section id="lobby"><button id="create">Create room</button>
+<label>Invite <input id="invite" autocomplete="off" spellcheck="false"></label><button id="join">Join</button></section>
+<output id="code"></output><output id="status" role="status">Ready</output>
+<section id="controls" hidden><button id="talk" disabled>Start turn</button><button id="leave">Leave</button>
+<p>Talk for up to 30 seconds, then finish your turn to send a caption. Your partner hears you while you speak.</p>
+<audio id="remote" autoplay controls></audio></section>
+<h2>Partner captions</h2><ol id="captions" aria-live="polite"></ol></main>
+<script>
+const el = id => document.getElementById(id);
+let token, pc, microphone, capturing = false, busy = false, connected = false, cutoff;
+async function post(path, body, member = token) {
+  const headers = {"Content-Type":"application/json","X-Local-Room":"1"};
+  if (member) headers.Authorization = "Bearer " + member;
+  const response = await fetch(path, {method:"POST",headers,body:JSON.stringify(body || {})});
+  const result = await response.json();
+  if (!response.ok) throw Error(result.detail || "Request failed.");
+  return result;
+}
+function reset(message) {
+  clearTimeout(cutoff);
+  token = null; connected = capturing = busy = false;
+  if (microphone) microphone.getTracks().forEach(t => t.stop());
+  if (pc) { pc.onconnectionstatechange = null; pc.close(); }
+  pc = microphone = null;
+  el("remote").srcObject = null; el("controls").hidden = true; el("lobby").hidden = false;
+  el("code").textContent = ""; el("status").textContent = message; el("talk").textContent = "Start turn";
+  el("talk").disabled = true; el("captions").replaceChildren();
+}
+async function connect(create) {
+  if (busy) return;
+  busy = true;
+  try {
+    microphone = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
+    microphone.getAudioTracks()[0].enabled = false;
+    const info = create ? await post("/rooms") : await post("/join",{invite:el("invite").value.trim()});
+    token = info.member;
+    el("code").textContent = info.invite ? "Invite: " + info.invite : "";
+    el("captions").replaceChildren(); el("lobby").hidden = true; el("controls").hidden = false;
+    el("status").textContent = "Waiting for your partner";
+    pc = new RTCPeerConnection({iceServers:[]});
+    pc.addTrack(microphone.getAudioTracks()[0],microphone);
+    pc.ontrack = e => {
+      const output = el("remote");
+      output.srcObject = new MediaStream([e.track]);
+      output.play().catch(() => { el("status").textContent = "Press play to hear your partner."; });
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc && ["failed","closed"].includes(pc.connectionState)) end("Connection ended");
+    };
+    const channel = pc.createDataChannel("captions");
+    channel.onmessage = e => {
+      const m = JSON.parse(e.data);
+      if (m.event === "paired") { connected = true; el("status").textContent = "Paired"; el("talk").disabled = false; }
+      if (m.event === "caption") { const li = document.createElement("li"); li.textContent = m.text; el("captions").append(li); }
+      if (m.event === "closed") reset("Room closed");
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    if (pc.iceGatheringState !== "complete") await new Promise((resolve,reject) => {
+      const timer = setTimeout(() => reject(Error("Local ICE gathering timed out.")),8000);
+      pc.addEventListener("icegatheringstatechange",function check() {
+        if (pc.iceGatheringState === "complete") { clearTimeout(timer); pc.removeEventListener("icegatheringstatechange",check); resolve(); }
+      }); 
+    });
+    const answer = await post("/offer",{...pc.localDescription.toJSON(),webrtc_id:token});
+    await pc.setRemoteDescription(answer);
+  } catch(e) { await end(e.message); }
+  finally { busy = false; }
+}
+async function end(message) {
+  const member = token;
+  if (member) await post("/leave",{},member).catch(() => {});
+  reset(message);
+}
+async function toggle() {
+  if (busy || !connected) return;
+  busy = true; el("talk").disabled = true;
+  try {
+    if (!capturing) {
+      await post("/turn/start");
+      microphone.getAudioTracks()[0].enabled = true; capturing = true; el("talk").textContent = "Finish turn";
+      cutoff = setTimeout(toggle, 28000);
+    } else {
+      clearTimeout(cutoff); microphone.getAudioTracks()[0].enabled = false; capturing = false;
+      el("talk").textContent = "Captioning…"; await post("/turn/end"); el("talk").textContent = "Start turn";
+    }
+  } catch(e) { el("status").textContent = e.message; }
+  finally { busy = false; el("talk").disabled = !connected; }
+}
+el("create").onclick = () => connect(true);
+el("join").onclick = () => connect(false);
+el("talk").onclick = toggle;
+el("leave").onclick = () => end("Room closed");
+window.addEventListener("pagehide",() => { if(token) fetch("/leave",{method:"POST",headers:{Authorization:"Bearer "+token},keepalive:true}).catch(()=>{}); });
+</script></html>

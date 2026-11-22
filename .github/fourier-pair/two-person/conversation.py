@@ -119,10 +119,12 @@ class Relay(AsyncStreamHandler):
             self.samples += pcm.shape[-1]
 
     async def emit(self):
-        try:
-            return await asyncio.wait_for(self.outgoing.get(), timeout=.02)
-        except asyncio.TimeoutError:
-            return RATE, np.zeros((1, RATE // 50), dtype=np.int16)
+        if self.member and self.member.peer and self.member.peer.handler:
+            # The sender's RTP frames already contain the playout clock. Inserting
+            # silence on each late packet stretches words on the receiving track.
+            return await self.outgoing.get()
+        await asyncio.sleep(.02)
+        return RATE, np.zeros((1, RATE // 50), dtype=np.int16)
 
     async def shutdown(self):
         if self.member:

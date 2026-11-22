@@ -80,7 +80,12 @@ def quality(encoded, original):
     csum=np.r_[0,np.cumsum(captured*captured)]
     scaled=np.abs(score)/np.sqrt(np.maximum(csum[n:]-csum[:-n],1e-9)*np.sum(x*x))
     index=int(np.argmax(scaled))
+    size = n // 320 * 320
+    def envelope(values):
+        return np.sqrt(np.mean(values[:size].reshape(-1,320)**2, axis=1))
+    rms_correlation = np.corrcoef(envelope(x), envelope(captured[index:index+n]))[0,1]
     return {"peak_normalized_waveform_correlation":round(float(scaled[index]),4),
+            "aligned_20ms_rms_envelope_correlation":round(float(rms_correlation),4),
             "alignment_seconds":round(index/16000,3),
             "received_seconds":round(len(captured)/16000,3),
             "peak_abs_pcm":round(float(np.max(np.abs(captured))),4)}
@@ -128,9 +133,9 @@ async def main():
         await asyncio.sleep(1)
         print("Four web clients connected to two explicit rooms")
         await c.evaluate("listen()")
-        await asyncio.gather(a.evaluate("listen()"),b.evaluate("listen()"))
         try:
             for i,(sender,recipient,words) in enumerate([(a,b,"How much was it?"),(b,a,"It's worth eight dollars.")]):
+                await recipient.evaluate("listen()")
                 await sender.locator("#talk").click()
                 await sender.wait_for_function("document.querySelector('#talk').textContent==='Finish turn'")
                 await asyncio.sleep(.32)
@@ -141,11 +146,15 @@ async def main():
                 text=await recipient.locator("#captions li").inner_text()
                 heard=await recipient.evaluate("stopListen()")
                 metrics=quality(heard, clips[i])
+                wrong=quality(heard,clips[1-i])["peak_normalized_waveform_correlation"]
+                metrics["other_speaker_waveform_correlation"]=wrong
                 proof["turns"].append({"receiver":"B" if i==0 else "A","reference":words,"raw_partner_caption":text,**metrics})
                 save()
                 print(proof["turns"][-1])
                 assert expected_words(text)==expected_words(words),text
                 assert metrics["peak_normalized_waveform_correlation"]>.45,metrics
+                assert metrics["aligned_20ms_rms_envelope_correlation"]>.8,metrics
+                assert metrics["peak_normalized_waveform_correlation"]>wrong+.2,metrics
                 assert await sender.locator("#captions li").count()==i
             background=np.frombuffer(base64.b64decode(await c.evaluate("stopListen()")),dtype="<i2")
             proof["other_paired_room"]={"clients":2,"captions":[await pg.locator("#captions li").count() for pg in (c,d)],
